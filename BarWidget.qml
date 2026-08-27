@@ -57,7 +57,8 @@ BarWidget {
     injectPanel()
     settingsFile.setText(JSON.stringify({
       killSignal: root.setting("killSignal", "TERM"),
-      includeDocker: root.setting("includeDocker", "On") !== "Off",
+      includeDocker: root.setting("includeDocker", "Off") === "On",
+      dockerSocket: root.setting("dockerSocket", "/var/run/docker.sock"),
       includeUdp: root.setting("includeUdp", "Off") === "On",
       ignoredPorts: root.setting("ignoredPorts", "53,631,5353"),
       httpsPorts: root.setting("httpsPorts", "443,8443"),

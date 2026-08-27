@@ -2,9 +2,14 @@
 
 var MAX_ROWS = 256
 var MAX_OUTPUT_BYTES = 262144
+var MAX_META_FIELD_BYTES = 4096
 
 function maxOutputBytes() {
   return MAX_OUTPUT_BYTES
+}
+
+function maxMetaFieldBytes() {
+  return MAX_META_FIELD_BYTES
 }
 
 var COMMANDS = [
@@ -93,11 +98,15 @@ function parseSs(raw) {
     var users = usersAt >= 0 ? line.slice(usersAt) : ""
     var parts = head.split(/\s+/)
     if (parts.length < 4) continue
-    var local = splitHostPort(parts[3])
+    var netid = String(parts[0] || "").toLowerCase()
+    var hasNetid = netid === "tcp" || netid === "udp"
+    var proto = hasNetid ? netid : "tcp"
+    var local = splitHostPort(parts[hasNetid ? 4 : 3])
     if (!local.port) continue
     var proc = parseUsers(users)
     out.push({
       kind: "process",
+      proto: proto,
       host: local.host,
       port: local.port,
       pid: proc.pid,
@@ -251,6 +260,7 @@ function canSignalProcess(proc, currentUid, expectedStartTime) {
   var pid = Number(proc.pid)
   if (!isFinite(pid) || pid <= 1) return false
   if (Number(proc.uid) !== Number(currentUid)) return false
+  if (Number(proc.startTime) <= 0) return false
   if (Number(proc.startTime) !== Number(expectedStartTime)) return false
   return true
 }
@@ -265,6 +275,29 @@ function liveIdentityMatches(row, liveUid, liveStartTime, currentUid) {
 
 function killSignal(value) {
   return String(value || "").toUpperCase() === "KILL" ? "KILL" : "TERM"
+}
+
+function dockerHost(value) {
+  var path = trim(value || "/var/run/docker.sock")
+  if (path.indexOf("unix://") === 0) path = path.slice(7)
+  if (!path || path.charAt(0) !== "/") return ""
+  if (/[\u0000\r\n]/.test(path)) return ""
+  var parts = path.split("/")
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] === "..") return ""
+  }
+  return "unix://" + path
+}
+
+function validContainerId(value) {
+  return /^[0-9a-f]{12,64}$/i.test(trim(value))
+}
+
+function canStopContainer(row, expectedDockerHost) {
+  if (!row || row.kind !== "container") return false
+  var expected = dockerHost(expectedDockerHost)
+  var actual = row.dockerHost ? dockerHost(row.dockerHost) : ""
+  return !!expected && actual === expected && validContainerId(row.containerId)
 }
 
 function browseHost(host) {
@@ -292,16 +325,18 @@ function parseDockerPorts(field) {
   var out = []
   for (var i = 0; i < chunks.length; i++) {
     var chunk = trim(chunks[i])
-    var match = chunk.match(/([0-9A-Fa-f.:\[\]]+):(\d+)->/)
+    var match = chunk.match(/([0-9A-Fa-f.:\[\]]+):(\d+)->[^/]+\/(tcp|udp)/i)
     if (!match) continue
     var host = match[1]
     if (host.charAt(0) === "[") host = host.slice(1, host.length - 1)
-    out.push({ host: host, port: parsePort(match[2]), exposed: !isLoopback(host) })
+    out.push({ host: host, port: parsePort(match[2]), proto: match[3].toLowerCase(), exposed: !isLoopback(host) })
   }
   return out
 }
 
-function parseDockerPs(raw) {
+function parseDockerPs(raw, expectedDockerHost) {
+  var localDockerHost = dockerHost(expectedDockerHost)
+  if (!localDockerHost) return []
   var lines = String(raw || "").split(/\n/)
   var out = []
   for (var i = 0; i < lines.length; i++) {
@@ -310,11 +345,13 @@ function parseDockerPs(raw) {
     var parts = line.split("\t")
     if (parts.length < 3) continue
     var id = trim(parts[0])
+    if (!validContainerId(id)) continue
     var name = trim(parts[1])
     var published = parseDockerPorts(parts.slice(2).join("\t"))
     for (var p = 0; p < published.length; p++) {
       out.push({
         kind: "container",
+        proto: published[p].proto,
         host: published[p].host,
         port: published[p].port,
         pid: 0,
@@ -327,6 +364,7 @@ function parseDockerPs(raw) {
         exposed: published[p].exposed,
         containerId: id,
         containerName: name,
+        dockerHost: localDockerHost,
         label: ""
       })
       if (out.length >= MAX_ROWS) return out
@@ -336,20 +374,20 @@ function parseDockerPs(raw) {
 }
 
 function listenerKey(row) {
-  return String(row.host) + "|" + String(row.port)
+  return String(row.proto || "tcp") + "|" + String(row.host) + "|" + String(row.port)
 }
 
 function socketIdentity(row) {
   if (!row) return ""
   if (row.kind === "container" && row.containerId)
-    return "c:" + row.containerId + ":" + row.port
+    return "c:" + row.containerId + ":" + (row.proto || "tcp") + ":" + row.port
   if (row.comm === "docker-proxy")
-    return "n:docker-proxy:" + row.port
+    return "n:docker-proxy:" + (row.proto || "tcp") + ":" + row.port
   if (Number(row.pid) > 0)
-    return "p:" + row.pid + ":" + row.port
+    return "p:" + row.pid + ":" + (row.proto || "tcp") + ":" + row.port
   if (row.comm)
-    return "n:" + row.comm + ":" + row.port
-  return "h:" + row.host + ":" + row.port
+    return "n:" + row.comm + ":" + (row.proto || "tcp") + ":" + row.port
+  return "h:" + row.host + ":" + (row.proto || "tcp") + ":" + row.port
 }
 
 function hostRank(host) {
@@ -409,7 +447,7 @@ function mergeListeners(processRows, dockerRows) {
     var hit = dockerByPortHost[listenerKey(row)]
     if (!hit && row.comm === "docker-proxy") {
       for (var key in dockerByPortHost) {
-        if (dockerByPortHost[key].port === row.port) {
+        if (dockerByPortHost[key].port === row.port && (dockerByPortHost[key].proto || "tcp") === (row.proto || "tcp")) {
           hit = dockerByPortHost[key]
           break
         }
@@ -437,7 +475,7 @@ function mergeListeners(processRows, dockerRows) {
     if (!taken) {
       var already = false
       for (var o = 0; o < out.length; o++) {
-        if (out[o].kind === "container" && out[o].containerId === extra.containerId && out[o].port === extra.port)
+        if (out[o].kind === "container" && out[o].containerId === extra.containerId && out[o].port === extra.port && (out[o].proto || "tcp") === (extra.proto || "tcp"))
           already = true
       }
       if (!already) out.push(extra)
@@ -484,13 +522,42 @@ function parseStatStartTime(raw) {
 }
 
 function parseCmdline(raw) {
-  return String(raw || "").replace(/\u0000/g, " ").replace(/\s+$/g, "")
+  return String(raw || "").slice(0, MAX_META_FIELD_BYTES).replace(/\u0000/g, " ").replace(/\s+$/g, "")
 }
 
-function canKillRow(row, currentUid) {
+function parseProcMeta(raw) {
+  var lines = String(raw || "").split(/\n/)
+  var out = {}
+  for (var i = 0; i < lines.length; i++) {
+    if (!lines[i]) continue
+    var parts = lines[i].split("\t")
+    if (parts.length !== 6) continue
+    var pid = parseInt(parts[0], 10) || 0
+    var uid = parseInt(parts[1], 10)
+    var startTime = parseInt(parts[2], 10) || 0
+    if (pid <= 1 || !isFinite(uid) || uid < 0 || startTime <= 0) continue
+    out[String(pid)] = {
+      uid: uid,
+      startTime: startTime,
+      command: trim(parts[3]).slice(0, MAX_META_FIELD_BYTES),
+      cwd: trim(parts[4]).slice(0, MAX_META_FIELD_BYTES),
+      exe: trim(parts[5]).slice(0, MAX_META_FIELD_BYTES)
+    }
+  }
+  return out
+}
+
+function canKillRow(row, currentUid, expectedDockerHost) {
   if (!row) return false
-  if (row.kind === "container") return !!row.containerId
+  if (row.kind === "container") return canStopContainer(row, expectedDockerHost)
   return canSignalProcess(row, currentUid, row.startTime)
+}
+
+function safeConfirmFragment(value) {
+  return String(value || "")
+    .replace(/</g, "‹")
+    .replace(/>/g, "›")
+    .replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, " ")
 }
 
 function titleFor(row) {
@@ -511,9 +578,10 @@ function subtitleFor(row) {
 
 function confirmMessage(row, signalName) {
   var signal = killSignal(signalName)
+  var title = safeConfirmFragment(titleFor(row))
   if (row.kind === "container")
-    return "Stop container " + titleFor(row) + " (port " + row.port + ")?"
-  return "Send SIG" + signal + " to " + titleFor(row) + " (pid " + row.pid + ", port " + row.port + ")?"
+    return "Stop container " + title + " (port " + row.port + ")?"
+  return "Send SIG" + signal + " to " + title + " (pid " + row.pid + ", port " + row.port + ")?"
 }
 
 function devPortCount(listeners, currentUid) {
@@ -534,10 +602,12 @@ function parseSettings(raw) {
     parsed = {}
   }
   if (!parsed || typeof parsed !== "object") parsed = {}
+  var socketValue = parsed.dockerSocket === undefined ? "/var/run/docker.sock" : parsed.dockerSocket
   return {
     killSignal: killSignal(parsed.killSignal),
     includeUdp: parsed.includeUdp === true,
-    includeDocker: parsed.includeDocker !== false,
+    includeDocker: parsed.includeDocker === true,
+    dockerSocket: dockerHost(socketValue),
     ignoredPorts: String(parsed.ignoredPorts === undefined ? "53,631,5353" : parsed.ignoredPorts),
     httpsPorts: String(parsed.httpsPorts || "443,8443"),
     refreshIntervalSec: Math.max(2, Math.min(120, parseInt(parsed.refreshIntervalSec, 10) || 5))
@@ -548,7 +618,9 @@ if (typeof module !== "undefined") {
   module.exports = {
     MAX_ROWS: MAX_ROWS,
     MAX_OUTPUT_BYTES: MAX_OUTPUT_BYTES,
+    MAX_META_FIELD_BYTES: MAX_META_FIELD_BYTES,
     maxOutputBytes: maxOutputBytes,
+    maxMetaFieldBytes: maxMetaFieldBytes,
     COMMANDS: COMMANDS,
     parsePort: parsePort,
     parsePortQuery: parsePortQuery,
@@ -568,6 +640,9 @@ if (typeof module !== "undefined") {
     liveIdentityMatches: liveIdentityMatches,
     canKillRow: canKillRow,
     killSignal: killSignal,
+    dockerHost: dockerHost,
+    validContainerId: validContainerId,
+    canStopContainer: canStopContainer,
     openUrl: openUrl,
     parseDockerPs: parseDockerPs,
     mergeListeners: mergeListeners,
@@ -577,6 +652,7 @@ if (typeof module !== "undefined") {
     parseStatusUid: parseStatusUid,
     parseStatStartTime: parseStatStartTime,
     parseCmdline: parseCmdline,
+    parseProcMeta: parseProcMeta,
     titleFor: titleFor,
     subtitleFor: subtitleFor,
     confirmMessage: confirmMessage,

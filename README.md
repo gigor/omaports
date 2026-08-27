@@ -13,7 +13,7 @@ Centered overlay (same content, larger window; Super+Ctrl+P):
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/yuler/omaports.git --enable
+omarchy plugin add https://github.com/gigor/omaports.git --enable
 ```
 
 Local checkout (symlink, so edits reload without copying):
@@ -22,7 +22,7 @@ Local checkout (symlink, so edits reload without copying):
 make link enable
 ```
 
-That replaces a previously copied `~/.config/omarchy/plugins/yuler.omaports` with a symlink to this repo. Saved QML/JS reloads in the shell automatically.
+`make link` refuses to replace an existing file, directory, or different symlink. Move the existing path away or remove it explicitly first. Saved QML/JS reloads in the shell automatically.
 
 `omarchy plugin validate` refuses a plugin *path* that is itself a symlink (it walks `-type l`). `make validate` therefore checks this checkout, which is a real directory. `omarchy plugin add` still installs a normal clone.
 
@@ -50,7 +50,7 @@ o.bind("SUPER + CTRL + P", "Port Manager", "omarchy-shell shell toggle yuler.oma
 - **Bar**: Port Manager mark (RJ45 jack with a slash, theme-colored — not the network ethernet glyph). Left click opens the panel. Right click refreshes.
 - **Panel / overlay**: icon + **Port Manager** + port count, then search and the port list. Super+Ctrl+P opens the larger centered overlay; shortcuts are the same as the bar panel.
 
-Kill always asks first. Only the current user's processes are signaled, after checking `/proc` uid and start time. Docker stop runs only when you already have permission to talk to the daemon. Names live in `~/.local/state/omarchy/omaports/names.json`.
+Kill always asks first, with Cancel selected by default. Only the current user's processes are signaled, after checking `/proc` uid and start time. Docker support is off by default and accepts only a configured local Unix socket. Names live in `~/.local/state/omarchy/omaports/names.json`.
 
 ## Keyboard shortcuts
 
@@ -71,7 +71,7 @@ The footer follows focus. Search shows **Tab**. The list shows **Tab**, **↑/�
 
 ## Configure
 
-Bar settings expose kill signal (TERM/KILL), Docker, UDP, ignored ports, HTTPS ports, and refresh interval.
+Bar settings expose kill signal (TERM/KILL), Docker, the local Docker socket, UDP, ignored ports, HTTPS ports, and refresh interval. Docker is off by default. Remote `tcp://` and `ssh://` Docker endpoints are refused.
 
 ## Remove
 
