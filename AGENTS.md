@@ -42,7 +42,7 @@ Open the overlay: `omarchy-shell shell toggle yuler.omaports`
 
 - **One UI**: `PortManagerView` is shared. Bar vs overlay only differ in chrome (anchor popout vs scrim + card) and width/height.
 - **Logic in `Model.js`**: `ss` parse, ignore lists, filter, `canKillRow` / `canSignalProcess`, open/copy URLs. Add tests in `test/model-test.js` when you change it.
-- **Kill is gated**: confirm dialog first. Only the current user's processes (uid + start time via `/proc`). Docker `stop` only when the daemon is already usable. Lowercase `k` moves up; **`K`** (and `x`) kills.
+- **Kill is gated**: confirm dialog first, with Cancel selected. Only the current user's processes (uid + start time via `/proc`). Docker is off by default, is locked to a configured local Unix socket, and rechecks that socket before `stop`. Lowercase `k` moves up; **`K`** (and `x`) kills.
 - **Two focus panes**: search and list. **Tab** toggles; do not treat Shift+Tab as a separate direction. List actions (`y`/`c`, `x`/`K`, `r`, `j`/`k`) apply only when the list is focused.
 
 ## UI conventions

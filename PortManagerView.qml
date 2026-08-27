@@ -180,13 +180,16 @@ Item {
 
   function askKill(row) {
     if (!row) return
-    if (row.kind !== "container" && !Model.canKillRow(row, uid)) {
-      flashStatus("Can only stop processes you own")
+    var dockerHost = collector && collector.parsedSettings ? collector.parsedSettings.dockerHost : ""
+    if (!Model.canKillRow(row, uid, dockerHost)) {
+      flashStatus(row.kind === "container"
+        ? "Docker target is not a verified local socket"
+        : "Can only stop processes you own")
       return
     }
     pendingRow = row
     confirmOpen = true
-    confirmDialog.selectedIndex = 1
+    confirmDialog.selectedIndex = 0
     Qt.callLater(function() { if (confirmDialog) confirmDialog.forceActiveFocus() })
   }
 
@@ -204,10 +207,13 @@ Item {
   }
 
   // Same-invocation check: live /proc Uid + stat starttime (field 20 after last ")")
-  // must match the confirmed row before signaling. $1 pid, $2 uid, $3 start, $4 TERM|KILL.
+  // must match the confirmed row, and the PID must still own the selected port.
+  // $1 pid, $2 uid, $3 start, $4 TERM|KILL, $5 port, $6 tcp|udp.
   readonly property string killScript: [
-    "pid=$1; want_uid=$2; want_start=$3; sig=$4",
+    "pid=$1; want_uid=$2; want_start=$3; sig=$4; port=$5; proto=$6",
     "if [ \"$pid\" -le 1 ] 2>/dev/null; then exit 1; fi",
+    "case $port in ''|*[!0-9]*) exit 1 ;; esac",
+    "case $proto in tcp) ss_args=-ltnp ;; udp) ss_args=-lunp ;; *) exit 1 ;; esac",
     "status=$(cat \"/proc/$pid/status\") || exit 1",
     "stat=$(cat \"/proc/$pid/stat\") || exit 1",
     "live_uid=",
@@ -224,13 +230,21 @@ Item {
     "[ -n \"$live_uid\" ] && [ -n \"$live_start\" ] || exit 1",
     "[ \"$live_uid\" = \"$want_uid\" ] || exit 1",
     "[ \"$live_start\" = \"$want_start\" ] || exit 1",
+    "ss -H \"$ss_args\" 2>/dev/null | grep -Eq \":$port[[:space:]].*\\\",pid=$pid,\" || exit 1",
     "exec kill -s \"$sig\" \"$pid\""
   ].join("\n")
 
   function runKill(row) {
     if (!row) return
     if (row.kind === "container") {
-      stopProc.command = ["docker", "stop", row.containerId]
+      if (!Model.canStopContainer(row, collector.parsedSettings.dockerHost)) {
+        flashStatus("Refusing to stop this container")
+        return
+      }
+      stopProc.command = [
+        "docker", "--host", row.dockerHost,
+        "stop", row.containerId
+      ]
       stopProc.running = false
       stopProc.running = true
       return
@@ -247,7 +261,9 @@ Item {
       String(row.pid),
       String(collector.uid),
       String(row.startTime),
-      killSig
+      killSig,
+      String(row.port),
+      String(row.proto || "tcp")
     ]
     killProc.running = false
     killProc.running = true

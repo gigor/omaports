@@ -5,16 +5,21 @@ SHELL      := /bin/bash
 
 .PHONY: link unlink test validate enable disable restart
 
-# Point Omarchy at this checkout. The plugins dir entry is a symlink to the
-# repo; files inside the repo stay real. Validate forbids symlinks *inside*
-# the folder, and plugin remove already knows how to unlink a checkout.
+# Point Omarchy at this checkout. Refuse to replace any existing path: the
+# caller must remove or move it explicitly before linking this checkout.
 link:
 	mkdir -p "$(dir $(PLUGIN_DIR))"
-	@if [[ -e $(PLUGIN_DIR) && ! -L $(PLUGIN_DIR) ]]; then \
-	  echo "replacing copied plugin directory with a symlink"; \
-	  rm -rf "$(PLUGIN_DIR)"; \
+	@if [[ -e "$(PLUGIN_DIR)" || -L "$(PLUGIN_DIR)" ]]; then \
+	  if [[ -L "$(PLUGIN_DIR)" && "$$(readlink -f "$(PLUGIN_DIR)")" == "$(REPO)" ]]; then \
+	    echo "already linked $(PLUGIN_DIR) -> $(REPO)"; \
+	  else \
+	    echo "refusing to replace existing path: $(PLUGIN_DIR)" >&2; \
+	    echo "move it away or remove it explicitly, then run make link again" >&2; \
+	    exit 1; \
+	  fi; \
+	else \
+	  ln -s "$(REPO)" "$(PLUGIN_DIR)"; \
 	fi
-	ln -sfn "$(REPO)" "$(PLUGIN_DIR)"
 	@echo "linked $(PLUGIN_DIR) -> $(REPO)"
 	$(MAKE) validate
 

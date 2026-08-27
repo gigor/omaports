@@ -13,10 +13,10 @@ Item {
   property string errorText: ""
   property bool loading: false
   property var pendingMeta: ({})
-  property int enrichPid: 0
   property var rawProcess: []
   property var rawDocker: []
   property bool dockerPending: false
+  property bool enrichPending: false
 
   readonly property var parsedSettings: {
     var docker = settings && settings.includeDocker
@@ -24,7 +24,8 @@ Item {
     return {
       killSignal: Model.killSignal(settings && settings.killSignal),
       includeUdp: udp === true || udp === "On",
-      includeDocker: docker !== false && docker !== "Off",
+      includeDocker: docker === true || docker === "On",
+      dockerHost: Model.dockerHost(settings && settings.dockerSocket),
       ignoredPorts: String((settings && settings.ignoredPorts) || "53,631,5353"),
       httpsPorts: String((settings && settings.httpsPorts) || "443,8443"),
       refreshIntervalSec: Math.max(2, Math.min(120, parseInt(settings && settings.refreshIntervalSec, 10) || 5))
@@ -38,17 +39,30 @@ Item {
   }
 
   function refresh() {
+    if (root.loading) return
     root.loading = true
     root.errorText = ""
     root.rawProcess = []
     root.rawDocker = []
+    root.pendingMeta = ({})
+    root.dockerPending = false
+    root.enrichPending = false
     ssProc.running = false
-    ssProc.command = root.cappedStdout(root.parsedSettings.includeUdp ? "ss -ltunpH" : "ss -ltnpH")
+    ssProc.command = root.cappedCommand(root.parsedSettings.includeUdp
+      ? ["ss", "-ltunpH"]
+      : ["ss", "-ltnpH"])
     ssProc.running = true
   }
 
-  function cappedStdout(producer) {
-    return ["sh", "-c", producer + " | head -c " + String(Model.maxOutputBytes())]
+  function cappedCommand(argv) {
+    var command = [
+      "sh", "-c",
+      "limit=$1; shift; \"$@\" | head -c \"$limit\"",
+      "omaports-cap",
+      String(Model.maxOutputBytes())
+    ]
+    for (var i = 0; i < argv.length; i++) command.push(String(argv[i]))
+    return command
   }
 
   function rebuild() {
@@ -59,7 +73,7 @@ Item {
       rows[i] = Model.enrichProcess(rows[i], root.pendingMeta[String(rows[i].pid)] || {})
     }
     root.listeners = rows
-    root.loading = false
+    root.loading = root.enrichPending || root.dockerPending
   }
 
   function startEnrich(rows) {
@@ -72,34 +86,46 @@ Item {
         pids.push(pid)
       }
     }
-    root.enrichQueue = pids
     root.pendingMeta = ({})
-    enrichNext()
-  }
-
-  property var enrichQueue: []
-
-  function enrichNext() {
-    if (!root.enrichQueue.length) {
+    if (!pids.length) {
+      root.enrichPending = false
       rebuild()
       return
     }
-    root.enrichPid = root.enrichQueue.shift()
-    statusProc.running = false
-    statusProc.command = ["cat", "/proc/" + root.enrichPid + "/status"]
-    statusProc.running = true
+    root.enrichPending = true
+    var command = [
+      "sh", "-c", root.metaScript, "omaports-meta",
+      String(Model.maxMetaFieldBytes())
+    ]
+    for (var p = 0; p < pids.length; p++) command.push(String(pids[p]))
+    metaProc.running = false
+    metaProc.command = command
+    metaProc.running = true
   }
 
-  function storeMeta(pid, patch) {
-    var next = ({})
-    for (var key in root.pendingMeta) next[key] = root.pendingMeta[key]
-    var cur = next[String(pid)] || {}
-    var merged = {}
-    for (var k in cur) merged[k] = cur[k]
-    for (var p in patch) merged[p] = patch[p]
-    next[String(pid)] = merged
-    root.pendingMeta = next
-  }
+  // Print one tab-separated, size-limited record per PID. Tabs, newlines,
+  // carriage returns, and NUL bytes are replaced before QML parses the data.
+  readonly property string metaScript: [
+    "limit=$1; shift",
+    "clean() { head -c \"$limit\" | tr '\\000\\011\\012\\015' '    '; }",
+    "for pid do",
+    "  case $pid in ''|*[!0-9]*) continue ;; esac",
+    "  [ \"$pid\" -gt 1 ] || continue",
+    "  uid=",
+    "  while IFS= read -r line; do",
+    "    case $line in Uid:*) set -- $line; uid=$2; break ;; esac",
+    "  done < \"/proc/$pid/status\"",
+    "  stat=$(cat \"/proc/$pid/stat\" 2>/dev/null) || continue",
+    "  rest=${stat##*)}",
+    "  set -- $rest",
+    "  start=${20}",
+    "  [ -n \"$uid\" ] && [ -n \"$start\" ] || continue",
+    "  cmd=$(clean < \"/proc/$pid/cmdline\" 2>/dev/null)",
+    "  cwd=$(readlink \"/proc/$pid/cwd\" 2>/dev/null | clean)",
+    "  exe=$(readlink \"/proc/$pid/exe\" 2>/dev/null | clean)",
+    "  printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$pid\" \"$uid\" \"$start\" \"$cmd\" \"$cwd\" \"$exe\"",
+    "done"
+  ].join("\n")
 
   Process {
     id: uidProc
@@ -118,15 +144,19 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.rawProcess = Model.parseSs(text)
-        root.startEnrich(root.rawProcess)
-        if (root.parsedSettings.includeDocker) {
+        if (root.parsedSettings.includeDocker && root.parsedSettings.dockerHost) {
           root.dockerPending = true
           dockerProc.running = false
-          dockerProc.command = root.cappedStdout("docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Ports}}'")
+          dockerProc.command = root.cappedCommand([
+            "docker", "--host", root.parsedSettings.dockerHost,
+            "ps", "--format", "{{.ID}}\\t{{.Names}}\\t{{.Ports}}"
+          ])
           dockerProc.running = true
         } else {
           root.rawDocker = []
+          root.dockerPending = false
         }
+        root.startEnrich(root.rawProcess)
       }
     }
     stderr: StdioCollector { waitForEnd: true }
@@ -134,6 +164,8 @@ Item {
       if (code !== 0 && code !== 141) {
         root.errorText = "Could not read listening sockets"
         root.rawProcess = []
+        root.dockerPending = false
+        root.enrichPending = false
         root.loading = false
       }
     }
@@ -145,7 +177,7 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        root.rawDocker = Model.parseDockerPs(text)
+        root.rawDocker = Model.parseDockerPs(text, root.parsedSettings.dockerHost)
         root.dockerPending = false
         root.rebuild()
       }
@@ -160,68 +192,15 @@ Item {
   }
 
   Process {
-    id: statusProc
+    id: metaProc
     running: false
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.storeMeta(root.enrichPid, { uid: Model.parseStatusUid(text) })
+      onStreamFinished: root.pendingMeta = Model.parseProcMeta(text)
     }
     onExited: {
-      statProc.running = false
-      statProc.command = ["cat", "/proc/" + root.enrichPid + "/stat"]
-      statProc.running = true
+      root.enrichPending = false
+      root.rebuild()
     }
-  }
-
-  Process {
-    id: statProc
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.storeMeta(root.enrichPid, { startTime: Model.parseStatStartTime(text) })
-    }
-    onExited: {
-      cmdProc.running = false
-      cmdProc.command = ["cat", "/proc/" + root.enrichPid + "/cmdline"]
-      cmdProc.running = true
-    }
-  }
-
-  Process {
-    id: cmdProc
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.storeMeta(root.enrichPid, { command: Model.parseCmdline(text) })
-    }
-    onExited: {
-      cwdProc.running = false
-      cwdProc.command = ["readlink", "/proc/" + root.enrichPid + "/cwd"]
-      cwdProc.running = true
-    }
-  }
-
-  Process {
-    id: cwdProc
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.storeMeta(root.enrichPid, { cwd: String(text || "").trim() })
-    }
-    onExited: {
-      exeProc.running = false
-      exeProc.command = ["readlink", "/proc/" + root.enrichPid + "/exe"]
-      exeProc.running = true
-    }
-  }
-
-  Process {
-    id: exeProc
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.storeMeta(root.enrichPid, { exe: String(text || "").trim() })
-    }
-    onExited: root.enrichNext()
   }
 }

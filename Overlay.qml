@@ -53,7 +53,8 @@ Item {
     id: collector
     settings: ({
       killSignal: "TERM",
-      includeDocker: "On",
+      includeDocker: "Off",
+      dockerSocket: "/var/run/docker.sock",
       includeUdp: "Off",
       ignoredPorts: "53,631,5353",
       httpsPorts: "443,8443",
@@ -94,6 +95,7 @@ Item {
       collector.settings = {
         killSignal: parsed.killSignal,
         includeDocker: parsed.includeDocker ? "On" : "Off",
+        dockerSocket: parsed.dockerSocket,
         includeUdp: parsed.includeUdp ? "On" : "Off",
         ignoredPorts: parsed.ignoredPorts,
         httpsPorts: parsed.httpsPorts,
